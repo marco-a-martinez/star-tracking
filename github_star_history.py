@@ -5,6 +5,7 @@ GitHub Star History Collector - Fetches monthly star data for repos using GraphQ
 Usage:
     python3 github_star_history.py              # Default: 2025-01-01
     python3 github_star_history.py 2024-01-01   # Custom start date
+    python3 github_star_history.py 2025-01-01 output.csv  # Custom output file
 """
 
 import subprocess
@@ -13,6 +14,19 @@ import csv
 import sys
 from collections import defaultdict
 from datetime import datetime
+
+# ============================================================================
+# CONFIGURATION - Add or remove repositories here
+# ============================================================================
+REPOSITORIES = [
+    ("coder", "coder"),
+    ("coder", "code-server"),
+    ("coder", "blink"),
+    ("coder", "boundary"),
+    ("coder", "agentapi"),
+    ("coder", "aibridge"),
+]
+# ============================================================================
 
 def run_graphql(query):
     result = subprocess.run(
@@ -84,26 +98,28 @@ def fetch_stars_since(owner, repo, since_date):
     
     return all_stars
 
-def get_repo_totals():
-    query = '''
-    {
-      coder: repository(owner: "coder", name: "coder") { stargazerCount }
-      codeServer: repository(owner: "coder", name: "code-server") { stargazerCount }
-    }
+def get_repo_total(owner, repo):
+    query = f'''
+    {{
+      repository(owner: "{owner}", name: "{repo}") {{
+        stargazerCount
+      }}
+    }}
     '''
     data = run_graphql(query)
-    return data["data"]["coder"]["stargazerCount"], data["data"]["codeServer"]["stargazerCount"]
+    return data["data"]["repository"]["stargazerCount"]
 
 def main():
     since_date = sys.argv[1] if len(sys.argv) > 1 else "2025-01-01"
     output_file = sys.argv[2] if len(sys.argv) > 2 else "github_stars.csv"
     
     print(f"Fetching stars since {since_date}")
+    print(f"Tracking {len(REPOSITORIES)} repositories")
     
-    # Fetch star data
+    # Fetch star data for all repos
     all_stars = []
-    all_stars.extend(fetch_stars_since("coder", "coder", since_date))
-    all_stars.extend(fetch_stars_since("coder", "code-server", since_date))
+    for owner, repo in REPOSITORIES:
+        all_stars.extend(fetch_stars_since(owner, repo, since_date))
     
     # Aggregate by month and repo
     monthly = defaultdict(lambda: defaultdict(int))
@@ -112,43 +128,68 @@ def main():
         repo = star["repo"]
         monthly[month][repo] += 1
     
-    # Get current totals
-    coder_total, cs_total = get_repo_totals()
-    print(f"\nCurrent totals: coder/coder={coder_total}, coder/code-server={cs_total}")
+    # Get current totals for all repos
+    repo_totals = {}
+    print("\nCurrent totals:")
+    for owner, repo in REPOSITORIES:
+        repo_key = f"{owner}/{repo}"
+        total = get_repo_total(owner, repo)
+        repo_totals[repo_key] = total
+        print(f"  {repo_key}: {total:,}")
     
-    # Calculate all-time by working backwards
+    # Calculate all-time by working backwards from current total
     months = sorted(monthly.keys(), reverse=True)
-    coder_cumulative = {}
-    cs_cumulative = {}
-    coder_running = coder_total
-    cs_running = cs_total
+    cumulative = {repo_key: {} for repo_key in repo_totals.keys()}
+    running = dict(repo_totals)  # Copy current totals
     
     for month in months:
-        coder_cumulative[month] = coder_running
-        cs_cumulative[month] = cs_running
-        coder_running -= monthly[month].get("coder/coder", 0)
-        cs_running -= monthly[month].get("coder/code-server", 0)
+        for repo_key in repo_totals.keys():
+            cumulative[repo_key][month] = running[repo_key]
+            running[repo_key] -= monthly[month].get(repo_key, 0)
+    
+    # Build column names
+    repo_names = [f"{owner}/{repo}" for owner, repo in REPOSITORIES]
+    monthly_cols = repo_names
+    alltime_cols = [f"{name} All-Time" for name in repo_names]
     
     # Write CSV
     with open(output_file, 'w', newline='') as f:
         writer = csv.writer(f)
-        writer.writerow(['Month', 'coder/coder', 'code-server', 'coder/coder All-Time', 'code-server All-Time'])
+        writer.writerow(['Month'] + monthly_cols + alltime_cols)
         for month in sorted(monthly.keys()):
-            coder = monthly[month].get("coder/coder", 0)
-            cs = monthly[month].get("coder/code-server", 0)
-            writer.writerow([month, coder, cs, coder_cumulative.get(month, ''), cs_cumulative.get(month, '')])
+            row = [month]
+            # Monthly counts
+            for repo_key in repo_names:
+                row.append(monthly[month].get(repo_key, 0))
+            # All-time totals
+            for repo_key in repo_names:
+                row.append(cumulative[repo_key].get(month, ''))
+            writer.writerow(row)
     
     print(f"\nWritten to {output_file}")
     
-    # Also print to console
-    print("\n" + "="*85)
-    print(f"{'Month':<10} {'coder/coder':>12} {'code-server':>12} {'coder Total':>15} {'code-server Total':>18}")
-    print("-"*85)
+    # Print summary table to console
+    print("\n" + "="*120)
+    header = f"{'Month':<10}"
+    for name in repo_names:
+        short_name = name.split('/')[1][:12]
+        header += f" {short_name:>12}"
+    header += " |"
+    for name in repo_names:
+        short_name = name.split('/')[1][:10] + " Tot"
+        header += f" {short_name:>14}"
+    print(header)
+    print("-"*120)
+    
     for month in sorted(monthly.keys()):
-        coder = monthly[month].get("coder/coder", 0)
-        cs = monthly[month].get("coder/code-server", 0)
-        print(f"{month:<10} {coder:>12,} {cs:>12,} {coder_cumulative.get(month, 0):>15,} {cs_cumulative.get(month, 0):>18,}")
-    print("-"*85)
+        row = f"{month:<10}"
+        for repo_key in repo_names:
+            row += f" {monthly[month].get(repo_key, 0):>12,}"
+        row += " |"
+        for repo_key in repo_names:
+            row += f" {cumulative[repo_key].get(month, 0):>14,}"
+        print(row)
+    print("-"*120)
 
 if __name__ == "__main__":
     main()
